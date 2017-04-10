@@ -14,7 +14,16 @@ typedef struct Node
 	struct Node *next;
 }Node;
 
+typedef struct ID_Node
+{
+	int new_id;
+	int old_id;
+	int fd;
+	struct ID_Node *next;
+}ID_Node;
+
 typedef struct Node LinkList;
+typedef struct ID_Node IDLinkList;
 
 #define SERVER_IP	"127.0.0.1"
 #define MIOT_SERVER_PORT	54322
@@ -28,11 +37,28 @@ typedef struct Node LinkList;
 #define MAX_KEY_LEN			30
 #define KEY_NUM_INDEX		0
 
-int  dispatch_client_init(void);
+#define MIN_ID_NUM			5000
+#define MAX_ID_NUM			1000000
+
+int  miot_client_init(void);
 int  dispatch_server_init(void);
 int dispatcher_listen_handler(int listenfd);
-int register_event(int fd,  char *key);
-int unregister_event(int fd,  char *key);
-int send_to_miot(char *msg);
+int dispatcher_recv_handler_one(int sockfd, char *msg, int msg_len, int flag);
+
+int dispatcher_recv_handler(int sockfd, int flag);
+int miot_msg_handler(char *msg);
+int client_msg_handler(char *msg);
+int send_to_register_client(char *msg);
+int upload_msg_handler(char *msg, int old_id, int fd);
+
+Node *init_key_list(void);
+int register_event(int fd,  char *key, int key_len);
+int unregister_event(int fd,  char *key, int key_len);
+void print_registered_event(void);
+
+ID_Node *init_id_list(void);
+int send_to_register_client(char *msg);
+int send_ack_to_client(char *msg, int id);
+void print_id_list(void);
 
 #endif

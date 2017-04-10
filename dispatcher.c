@@ -10,6 +10,7 @@
 
 struct dispatcher_data dispatcher;
 LinkList *key_list = NULL;
+IDLinkList *id_list = NULL;
 
 int main(int argc, char const *argv[])
 {
@@ -51,11 +52,11 @@ int main(int argc, char const *argv[])
 		for (i = 0; i < dispatcher.count_pollfds && n > 0; i++) {
 			if (dispatcher.pollfds[i].revents & POLLIN) {
 				if (dispatcher.pollfds[i].fd == miot_fd)
-					ispatcher_recv_handler(miot_fd, 0);		
+					dispatcher_recv_handler(miot_fd, 0);
 				else if (dispatcher.pollfds[i].fd == dispatch_listenfd)
 					dispatcher_listen_handler(dispatcher_listenfd);
 				else
-					ispatcher_recv_handler(dispatcher.pollfds[i].fd, 1);
+					dispatcher_recv_handler(dispatcher.pollfds[i].fd, 1);
 				n--;
 			} else if (miio.pollfds[i].revents & POLLOUT) {
 				n--;
@@ -129,19 +130,18 @@ int  dispatch_server_init(void)
 		return -1;
 	}
 
-	return dispatch_listenfd;	
+	return dispatch_listenfd;
 }
 
-
-
-static int dispatcher_listen_handler(int listenfd)
+int dispatcher_listen_handler(int listenfd)
 {
 
 	/*
 		listen client and add to pollfd
 	*/
 
-/*	int newfd;
+	/*
+	int newfd;
 	struct sockaddr_storage other_addr;
 	socklen_t sin_size = sizeof(struct sockaddr_storage);
 
@@ -171,22 +171,62 @@ static int dispatcher_listen_handler(int listenfd)
 		dispatcher.count_pollfds++;
 	}
 
-	return 0;*/
+	return 0;
+	*/
 }
 
-int miot_msg_handler(int sockfd)
+int miot_msg_handler(char *msg)
 {
 	/*
 
 	parse method
-
-	send the msg to the client which is interested
-	
-	so need to find the interested fd.
 	
 	*/
+
+
+	int ret = -1;
+
+	if (json_verify_method(msg, "method") == 0) {
+		/* It's a command msg */
+		log_printf(LOG_DEBUG, "cloud/mobile cmd: %s, strlen: %d, len: %d\n", msg, (int)strlen(msg), len);
+		/*
+			send the msg to the client which is interested
+			so need to find the interested fd.
+		*/
+		send_to_register_client(msg);
+	} else {
+		/* It's a report ACK msg */
+		log_printf(LOG_DEBUG, "cloud ack: %s, strlen: %d, len: %d\n", msg, (int)strlen(msg), len);
+		/*
+			get id, and find which fd should to send
+		*/
+		send_ack_to_client(msg);
+	}
+
+	return ret;
 }
 
+int client_msg_handler(char *msg)
+{
+	/*
+		upload info or ack
+	*/
+
+	if (json_verify_method(msg, "method") == 0 && json_verify_get_int(msg, "id", &id) == 0) {
+		/*
+			upload info
+			parse msg, if id exist, means this msg need ack, should add to queue.
+			so repleace old id with new id,record the corresponding relationship
+			new_id:		old_id, fd
+
+			if id is not exist,means ack no need, just send to miot
+		*/
+			upload_msg_handler(msg, id, fd);
+	} else {
+		//ack, just send to miot
+		send(fd. msg, strlen(msg), 0);
+	}
+}
 
 static int msg_dispatcher(const char *msg, int len, int sockfd)
 {
@@ -217,7 +257,7 @@ static int msg_dispatcher(const char *msg, int len, int sockfd)
  *
  * return the length we've consumed, -1 on error
  */
-static int dispatcher_recv_handler_one(int sockfd, char *msg, int msg_len, int flag)
+int dispatcher_recv_handler_one(int sockfd, char *msg, int msg_len, int flag)
 {
 	struct json_tokener *tok;
 	struct json_object *json;
@@ -330,7 +370,7 @@ static bool check_clientfds(int fd)
 	return false;
 }
 
-Node *init_list(void)
+Node *init_key_list(void)
 {
 	LinkList *pHead = NULL;
 
@@ -341,6 +381,21 @@ Node *init_list(void)
 	}
 	
 	memset(pHead, 0, sizeof(LinkList));
+	pHead->next = NULL;
+
+	return pHead;
+}
+
+ID_Node *init_id_list(void)
+{
+	IDLinkList *pHead = NULL;
+
+	pHead = (IDLinkList *)malloc(sizeof(IDLinkList));
+	if (pHead == NULL) {
+		printf("ERROR\n") ;
+		return NULL;
+	}
+	memset(pHead, 0, sizeof(IDLinkList));
 	pHead->next = NULL;
 
 	return pHead;
@@ -455,6 +510,102 @@ void print_registered_event(void)
 			printf("%d, ", p->fd[i]);
 		}
 		printf("\n");
+		p = p->next;
+	}
+	printf("=====================\n");
+}
+
+int send_to_register_client(char *msg)
+{
+	char *key = msg;
+	int key_len = strlen(msg);
+	int key_found = 0;
+	int i, ret = -1;
+	Node *p = key_list->next;
+
+	while(p) {
+		if (memcmp(p->key, key, key_len) == 0) {
+			key_found = 1;
+			break;
+		}
+		p = p->next;
+	}
+
+	if (key_found == 1) {
+		for (i = 0; i < MAX_CLIENT_NUM && p->fd[i]; i++) {
+			printf("send to registered fd :%d\n",  p->fd[i]);
+			//ret = send(p->fd[i], msg, strlen(msg), 0);
+		}
+	}
+	return ret;
+}
+
+int upload_msg_handler(char *msg, int old_id, int fd)
+{
+	ID_Node *pHead = id_list;
+	ID_Node *p = id_list;
+	ID_Node *q = id_list->next;
+	ID_Node *tmp;
+
+	while (q) {
+		q = q->next;
+		p = p->next;
+	}
+
+	tmp = (ID_Node *)malloc(sizeof(ID_Node));
+	if (tmp == NULL) {
+		return -1;
+	}
+	memset(tmp, 0, sizeof(ID_Node));
+	tmp->next = NULL;
+	tmp->new_id = new_id++;
+	tmp->old_id = old_id;
+	tmp->fd = fd;
+
+	p->next = tmp;
+	pHead->new_id += 1;
+	return 0;
+}
+
+int send_ack_to_client(char *msg, int id)
+{
+	ID_Node *pHead = id_list;
+	ID_Node *p = id_list;
+	ID_Node *q = id_list->next;
+	ID_Node *tmp;
+	int found = 0;
+	int ret = -1;
+
+	while (q) {
+		if (q->new_id == id) {
+			found = 1;
+			break;
+		}
+		q = q->next;
+		p = p->next;
+	}
+
+	if (found == 1) {
+		//replace id
+		//ret = send(q->fd, msg, strlen(msg), 0);
+		p->next = q-> next;
+		free(q);
+	} else {
+		printf("id %d not found\n",  id);
+	}
+	return ret;
+}
+
+
+
+void print_id_list(void)
+{
+	ID_Node *p = id_list->next;
+	int i = 0;
+
+	printf("=====================\n");
+	while(p) {
+		printf("%d:	%d,	%d\n", p->new_id, p->old_id, p->fd);
 		p = p->next;
 	}
 	printf("=====================\n");

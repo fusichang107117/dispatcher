@@ -6,6 +6,8 @@
 #define MAX_KEY_NUM			2
 #define MAX_KEY_LEN			30
 #define KEY_NUM_INDEX		0
+#define MIN_ID_NUM			5000
+#define MAX_ID_NUM			1000000
 
 typedef struct Node
 {
@@ -14,17 +16,52 @@ typedef struct Node
 	struct Node *next;
 }Node;
 
-typedef struct Node LinkList;
-LinkList *key_list = NULL;
+typedef struct ID_Node
+{
+	int new_id;
+	int old_id;
+	int fd;
+	struct ID_Node *next;
+}ID_Node;
 
+typedef struct Node LinkList;
+typedef struct ID_Node IDLinkList;
+
+LinkList *key_list = NULL;
+IDLinkList *id_list = NULL;
+
+Node *init_key_list(void);
 int register_event(int fd,  char *key, int key_len);
 int unregister_event(int fd,  char *key, int key_len);
 void print_registered_event(void);
-Node *init_list(void);
+
+ID_Node *init_id_list(void);
+int send_to_register_client(char *msg);
+int send_ack_to_client(char *msg, int id);
+void print_id_list(void);
+
+void test_regiter(void);
+void test_id(void);
+
+int new_id = MIN_ID_NUM;
+
 
 int main(int argc, char const *argv[])
 {
 	/* code */
+	key_list= init_key_list();
+	id_list = init_id_list();
+
+	test_id();
+
+//	unregister_event(fd1, key_a, strlen(key_a));
+//	print_registered_event();
+
+	return 0;
+}
+
+void test_regiter(void)
+{
 	int fd1 = 1001;
 	int fd2 = 1002;
 	int fd3 = 1003;
@@ -34,22 +71,11 @@ int main(int argc, char const *argv[])
 	char *key_c = "key-c";
 	char *key_d = "key-d";
 
-
-	key_list= init_list();
-
 	register_event(fd1, key_a, strlen(key_a));
 	print_registered_event();
 	register_event(fd2, key_a, strlen(key_a));
 	print_registered_event();
 	register_event(fd3, key_a, strlen(key_a));
-	print_registered_event();
-
-
-	register_event(fd1, key_b, strlen(key_b));
-	print_registered_event();
-	register_event(fd2, key_b, strlen(key_b));
-	print_registered_event();
-	register_event(fd3, key_b, strlen(key_b));
 	print_registered_event();
 
 	//register_event(fd2, key_b, strlen(key_b));
@@ -63,16 +89,37 @@ int main(int argc, char const *argv[])
 	unregister_event(fd2, key_b, strlen(key_a));
 	print_registered_event();
 
-	register_event(fd3, key_c, strlen(key_c));
-	print_registered_event();
-
-//	unregister_event(fd1, key_a, strlen(key_a));
-//	print_registered_event();
-
-	return 0;
+	send_to_register_client(key_a);
 }
 
-Node *init_list(void)
+void test_id(void)
+{
+	char *msg = "hello";
+	int fd1 = 1001;
+	int fd2 = 1002;
+	int fd3 = 1003;
+	int fd4 = 1004;
+
+	int id1 = 1;
+	int id2 = 2;
+	int id3 = 3;
+	int id4 = 4;
+
+	upload_msg_handler(msg, id1, fd1);
+	print_id_list();
+
+	upload_msg_handler(msg, id2, fd1);
+	print_id_list();
+
+	upload_msg_handler(msg, id1, fd2);
+	print_id_list();
+
+	send_ack_to_client(msg, 5000);
+	print_id_list();
+
+}
+
+Node *init_key_list(void)
 {
 	LinkList *pHead = NULL;
 
@@ -83,6 +130,21 @@ Node *init_list(void)
 	}
 	
 	memset(pHead, 0, sizeof(LinkList));
+	pHead->next = NULL;
+
+	return pHead;
+}
+
+ID_Node *init_id_list(void)
+{
+	IDLinkList *pHead = NULL;
+
+	pHead = (IDLinkList *)malloc(sizeof(IDLinkList));
+	if (pHead == NULL) {
+		printf("ERROR\n") ;
+		return NULL;
+	}
+	memset(pHead, 0, sizeof(IDLinkList));
 	pHead->next = NULL;
 
 	return pHead;
@@ -197,6 +259,102 @@ void print_registered_event(void)
 			printf("%d, ", p->fd[i]);
 		}
 		printf("\n");
+		p = p->next;
+	}
+	printf("=====================\n");
+}
+
+int send_to_register_client(char *msg)
+{
+	char *key = msg;
+	int key_len = strlen(msg);
+	int key_found = 0;
+	int i, ret = -1;
+	Node *p = key_list->next;
+
+	while(p) {
+		if (memcmp(p->key, key, key_len) == 0) {
+			key_found = 1;
+			break;
+		}
+		p = p->next;
+	}
+
+	if (key_found == 1) {
+		for (i = 0; i < MAX_CLIENT_NUM && p->fd[i]; i++) {
+			printf("send to registered fd :%d\n",  p->fd[i]);
+			//ret = send(p->fd[i], msg, strlen(msg), 0);
+		}
+	}
+	return ret;
+}
+
+int upload_msg_handler(char *msg, int old_id, int fd)
+{
+	ID_Node *pHead = id_list;
+	ID_Node *p = id_list;
+	ID_Node *q = id_list->next;
+	ID_Node *tmp;
+
+	while (q) {
+		q = q->next;
+		p = p->next;
+	}
+
+	tmp = (ID_Node *)malloc(sizeof(ID_Node));
+	if (tmp == NULL) {
+		return -1;
+	}
+	memset(tmp, 0, sizeof(ID_Node));
+	tmp->next = NULL;
+	tmp->new_id = new_id++;
+	tmp->old_id = old_id;
+	tmp->fd = fd;
+
+	p->next = tmp;
+	pHead->new_id += 1;
+	return 0;
+}
+
+int send_ack_to_client(char *msg, int id)
+{
+	ID_Node *pHead = id_list;
+	ID_Node *p = id_list;
+	ID_Node *q = id_list->next;
+	ID_Node *tmp;
+	int found = 0;
+	int ret = -1;
+
+	while (q) {
+		if (q->new_id == id) {
+			found = 1;
+			break;
+		}
+		q = q->next;
+		p = p->next;
+	}
+
+	if (found == 1) {
+		//replace id
+		//ret = send(q->fd, msg, strlen(msg), 0);
+		p->next = q-> next;
+		free(q);
+	} else {
+		printf("id %d not found\n",  id);
+	}
+	return ret;
+}
+
+
+
+void print_id_list(void)
+{
+	ID_Node *p = id_list->next;
+	int i = 0;
+
+	printf("=====================\n");
+	while(p) {
+		printf("%d:	%d,	%d\n", p->new_id, p->old_id, p->fd);
 		p = p->next;
 	}
 	printf("=====================\n");
