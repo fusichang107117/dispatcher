@@ -3,6 +3,8 @@
 #include <string.h>
 #include <stdint.h>
 #include <time.h>
+#include <sys/timerfd.h>
+#include <assert.h>
 #include <poll.h>
 #include <sys/ioctl.h>
 #include <sys/socket.h>
@@ -14,7 +16,7 @@
 #include <arpa/inet.h>
 #include "miio_dispatcher.h"
 
-int miot_fd, dispatch_listenfd;
+int miot_fd, dispatch_listenfd, timer_fd;
 struct dispatcher_data dispatcher;
 LinkList *key_list = NULL;
 IDLinkList *id_list = NULL;
@@ -50,6 +52,15 @@ int main(int argc, char const *argv[])
 	log_printf(LOG_INFO, "dispatcher listen fd: %d\n", dispatcher.pollfds[dispatcher.count_pollfds].fd);
 	dispatcher.count_pollfds++;
 
+	/* timer */
+	timer_fd = timer_setup();
+	assert(timer_fd > 0);
+	timer_start(timer_fd, TIMER_INTERVAL, TIMER_INTERVAL);
+	dispatcher.pollfds[dispatcher.count_pollfds].fd = timer_fd;
+	dispatcher.pollfds[dispatcher.count_pollfds].events = POLLIN;
+	log_printf(LOG_INFO, "dispatcher listen fd: %d\n", dispatcher.pollfds[dispatcher.count_pollfds].fd);
+	dispatcher.count_pollfds++;
+
 	while (n >= 0) {
 		int i;
 		n = poll(dispatcher.pollfds, dispatcher.count_pollfds, POLL_TIMEOUT);
@@ -60,11 +71,15 @@ int main(int argc, char const *argv[])
 			if (dispatcher.pollfds[i].revents & (POLLNVAL | POLLHUP | POLLERR)) {
 				int j = i;
 				log_printf(LOG_DEBUG, "dispatcher.pollfds[i].revents: %08x, %d\n",dispatcher.pollfds[i].revents, dispatcher.pollfds[i].fd);
-				if (dispatcher.pollfds[i].fd == miot_fd || dispatcher.pollfds[i].fd == dispatch_listenfd) {
+				if (dispatcher.pollfds[i].fd == miot_fd){
+					dispatcher.pollfds[i].fd = -1;
+					miot_fd = -1;
+					continue;
+				}
+				if (dispatcher.pollfds[i].fd == dispatch_listenfd) {
 					continue;
 				}
 				unregister_fd(dispatcher.pollfds[i].fd);
-				print_registered_event();
 				update_id_map(dispatcher.pollfds[i].fd);
 				close(dispatcher.pollfds[i].fd);
 				while (j < dispatcher.count_pollfds - 1 && dispatcher.pollfds[j].fd) {
@@ -75,7 +90,9 @@ int main(int argc, char const *argv[])
 				dispatcher.count_pollfds--;
 				n--;
 			} else if (dispatcher.pollfds[i].revents & POLLIN) {
-				if (dispatcher.pollfds[i].fd == miot_fd)
+				if (dispatcher.pollfds[i].fd == timer_fd)
+					timer_handler(timer_fd);
+				else if (dispatcher.pollfds[i].fd == miot_fd)
 					dispatcher_recv_handler(miot_fd, 0);
 				else if (dispatcher.pollfds[i].fd == dispatch_listenfd)
 					dispatcher_listen_handler(dispatch_listenfd);
@@ -149,6 +166,20 @@ int  dispatch_server_init(void)
 		return -1;
 	}
 	return dispatch_listenfd;
+}
+
+void timer_handler(int fd)
+{
+	uint64_t exp = 0;
+
+	/* just read out the "events" in fd, otherwise poll will keep
+	 * reporting POLLIN */
+	read(fd, &exp, sizeof(uint64_t));
+
+	if (miot_fd <= 0) {
+		miot_fd = miot_connect_init();
+		dispatcher.pollfds[0].fd = miot_fd;
+	}
 }
 
 /*
@@ -359,6 +390,37 @@ int dispatcher_recv_handler(int sockfd, int flag)
 		left_len = count + left_len - ret;
 		memmove(buf, buf + ret, left_len);
 	}
+	return 0;
+}
+
+int timer_setup(void)
+{
+	int fd;
+
+	fd = timerfd_create(CLOCK_MONOTONIC, TFD_NONBLOCK | TFD_CLOEXEC);
+	if (fd < 0) {
+		perror("timerfd_create");
+		return fd;
+	}
+
+	return fd;
+}
+
+int timer_start(int fd, int first_expire, int interval)
+{
+	struct itimerspec new_value;
+
+	new_value.it_value.tv_sec = first_expire / 1000;
+	new_value.it_value.tv_nsec = first_expire % 1000 * 1000000;
+
+	new_value.it_interval.tv_sec = interval / 1000;
+	new_value.it_interval.tv_nsec = interval % 1000 * 1000000;
+
+	if (timerfd_settime(fd, 0, &new_value, NULL) == -1) {
+		perror("timerfd_settime");
+		return -1;
+	}
+
 	return 0;
 }
 

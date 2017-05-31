@@ -7,8 +7,9 @@
 
 #define POLL_TIMEOUT			100	/* 100ms */
 #define MAX_CLIENT_NUM		20
-#define MAX_POLL_FDS			(MAX_CLIENT_NUM + 2)
-#define MAX_BUF			512
+#define MAX_POLL_FDS			(MAX_CLIENT_NUM + 3)
+#define MAX_BUF			1024
+#define TIMER_INTERVAL		3000	/* 3s */
 
 #define MAX_KEY_NUM			100
 #define MAX_KEY_LEN			16
@@ -64,6 +65,10 @@ int dispatcher_recv_handler_one(int sockfd, char *msg, int msg_len, int flag);
 
 int miot_msg_handler(char *msg, int msg_len);
 int client_msg_handler(char *msg, int len, int sockfd);
+
+int timer_setup(void);
+void timer_handler(int fd);
+int timer_start(int fd, int first_expire, int interval);
 
 int record_id_map(int old_id, int new_id, int fd);
 void update_id_map(int fd);
