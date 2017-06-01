@@ -15,8 +15,9 @@
 #define MAX_KEY_LEN			32
 #define KEY_NUM_INDEX		0
 
-#define MIN_ID_NUM			5000
-#define MAX_ID_NUM			1000000
+#define MAX_ID_NUM			2147483647
+
+#define VERSION			"1.0"
 
 struct dispatcher_data
 {
@@ -81,13 +82,14 @@ int register_event(int fd,  const char *key, int key_len);
 int unregister_fd_from_Node(Node *pNode, int fd);
 int unregister_event(int fd,  const char *key, int key_len);
 void unregister_fd(int fd);
+int delete_fd_from_dispathcer(int sockfd);
 void print_registered_event(void);
 
 int send_to_register_client(char *msg, int msg_len);
 int send_ack_to_client(char *msg);
 
-void print_id_list(void);
-
+void logfile_init(char *filename);
 void log_printf(log_level_t level, const char *fmt, ...);
 
+void print_id_list(void);
 #endif

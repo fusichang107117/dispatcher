@@ -1,9 +1,11 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <stdint.h>
+#include <stdbool.h>
+#include <getopt.h>
 #include <signal.h>
 #include <unistd.h>
+#include <getopt.h>
 #include <time.h>
 #include <sys/timerfd.h>
 #include <assert.h>
@@ -18,11 +20,22 @@
 #include <arpa/inet.h>
 #include "miio_dispatcher.h"
 
+FILE *log_file;
+log_level_t g_loglevel = LOG_DEBUG;
+
 int miot_fd, dispatch_listenfd, timer_fd;
 struct dispatcher_data dispatcher;
 LinkList *key_list = NULL;
 IDLinkList *id_list = NULL;
-int new_id = MIN_ID_NUM;
+
+static struct option options[] = {
+	{"help",	no_argument,		NULL, 'h'},
+	{"version",	no_argument,		NULL, 'v'},
+	{"loglevel",    required_argument,      NULL, 'l'},
+	{"logfile",	required_argument,      NULL, 'L'},
+	{"daemonize",	no_argument,		NULL, 'D'},
+	{NULL,		0,			0,	0}
+};
 
 static void sighandler(int sig)
 {
@@ -39,9 +52,44 @@ static void sighandler(int sig)
 	exit(-1);
 }
 
-int main(int argc, char const *argv[])
+int main(int argc, char *argv[])
 {
 	int n = 0;
+	int daemonize = 0;
+
+	log_file = stdout;
+
+	while (n >= 0) {
+		n = getopt_long(argc, argv, "hDvl:L:", options, NULL);
+		if (n < 0)
+			continue;
+		switch (n) {
+			case 'D':
+				daemonize = 1;
+				break;
+			case 'l':
+				g_loglevel = atoi(optarg);
+				if (g_loglevel > LOG_LEVEL_MAX)
+					g_loglevel = LOG_LEVEL_MAX;
+				log_printf(LOG_INFO, "Set log level to: %d\n", g_loglevel);
+				break;
+			case 'L':
+				logfile_init(optarg);
+				break;
+			case 'v':
+				fprintf(stdout, "%s\n", VERSION);
+				exit(1);
+			case 'h':
+			default:
+				fprintf(stderr, "Usage: %s\n"
+				"\t[-D --daemonize]\n"
+				"\t[-l --loglevel=<level>] set loglevel (0-4), bigger = more verbose\n"
+				"\t[-L --logfile=file] output log into file instead of stdout\n"
+				"\t[-h --help]\n"
+				, argv[0]);
+				exit(1);
+		}
+	}
 
 	signal(SIGINT, sighandler);
 	signal(SIGPIPE, SIG_IGN);
@@ -81,17 +129,24 @@ int main(int argc, char const *argv[])
 	log_printf(LOG_INFO, "timer fd: %d\n", dispatcher.pollfds[dispatcher.count_pollfds].fd);
 	dispatcher.count_pollfds++;
 
+	if (daemonize)
+		if (daemon(0, 1) < 0)
+			log_printf(LOG_WARNING, "daemonize fail: %m\n");
+	n = 0;
+
 	while (n >= 0) {
 		int i;
 		n = poll(dispatcher.pollfds, dispatcher.count_pollfds, POLL_TIMEOUT);
 		if (n <= 0) {
 			continue;
 		}
+
 		for (i = 0; i < dispatcher.count_pollfds && n > 0; i++) {
 			if (dispatcher.pollfds[i].revents & (POLLNVAL | POLLHUP | POLLERR)) {
 				int j = i;
 				log_printf(LOG_DEBUG, "dispatcher.pollfds[i].revents: %08x, %d\n",dispatcher.pollfds[i].revents, dispatcher.pollfds[i].fd);
-				if (dispatcher.pollfds[i].fd == miot_fd){
+				if (dispatcher.pollfds[i].fd == miot_fd) {
+					close(miot_fd);
 					dispatcher.pollfds[i].fd = -1;
 					miot_fd = -1;
 					continue;
@@ -99,15 +154,7 @@ int main(int argc, char const *argv[])
 				if (dispatcher.pollfds[i].fd == dispatch_listenfd) {
 					continue;
 				}
-				unregister_fd(dispatcher.pollfds[i].fd);
-				update_id_map(dispatcher.pollfds[i].fd);
-				close(dispatcher.pollfds[i].fd);
-				while (j < dispatcher.count_pollfds - 1 && dispatcher.pollfds[j].fd) {
-					dispatcher.pollfds[j] = dispatcher.pollfds[j + 1];
-					j++;
-				}
-				dispatcher.pollfds[j].fd = -1;
-				dispatcher.count_pollfds--;
+				delete_fd_from_dispathcer(dispatcher.pollfds[i].fd);
 				n--;
 			} else if (dispatcher.pollfds[i].revents & POLLIN) {
 				if (dispatcher.pollfds[i].fd == timer_fd)
@@ -250,6 +297,15 @@ int miot_msg_handler(char *msg, int msg_len)
 	return ret;
 }
 
+int get_newid(void)
+{
+	static int id=1;
+
+	if (id >= MAX_ID_NUM)
+		id = 1;
+	return id++;
+}
+
 /*
 *upload info or ack
 *parse msg, if id exist, means this msg need ack, should linked to list.
@@ -278,7 +334,7 @@ int client_msg_handler(char *msg, int len, int sockfd)
 			json_object_object_get_ex(save_obj, "key", &tmp_obj);
 			if (json_object_is_type(tmp_obj, json_type_string)) {
 				key = json_object_get_string(tmp_obj);
-				log_printf(LOG_DEBUG, "register, key is %s, sockfd is %d\n", key, sockfd);
+				log_printf(LOG_DEBUG, "register key: %s, fd: %d\n", key, sockfd);
 				register_event(sockfd, key, strlen(key));
 				ret = 0;
 			}
@@ -289,10 +345,10 @@ int client_msg_handler(char *msg, int len, int sockfd)
 				key = json_object_get_string(tmp_obj);
 				key_len = strlen(key);
 				if (key_len == 0) {
-					log_printf(LOG_DEBUG, "unregister all,sockfd is %d\n", sockfd);
+					log_printf(LOG_DEBUG, "unregister all,fd: %d\n", sockfd);
 					unregister_fd(sockfd);
 				} else {
-					log_printf(LOG_DEBUG, "unregister, key is %s, sockfd is %d\n", key, sockfd);
+					log_printf(LOG_DEBUG, "unregister key: %s, fd: %d\n", key, sockfd);
 					unregister_event(sockfd, key, strlen(key));
 				}
 				ret = 0;
@@ -300,12 +356,13 @@ int client_msg_handler(char *msg, int len, int sockfd)
 		} else if (json_verify_get_int(msg, "id", &old_id) == 0 ) {
 			int msg_len;
 			char *newmsg;
+			int new_id = get_newid();
 			/* replace with new id */
 			json_object_object_del(save_obj, "id");
-			json_object_object_add(save_obj, "id", json_object_new_int(++new_id));
+			json_object_object_add(save_obj, "id", json_object_new_int(new_id));
 			newmsg = (char *)json_object_to_json_string_ext(save_obj, JSON_C_TO_STRING_PLAIN);
 			msg_len = strlen(newmsg);
-			log_printf(LOG_DEBUG, "newmsg id %d, len %d\n", new_id, msg_len);
+			log_printf(LOG_DEBUG, "newmsg  id %d, len %d\n", new_id, msg_len);
 			record_id_map(old_id, new_id, sockfd);
 			ret = send(fd, newmsg, msg_len, 0);
 		} else {
@@ -386,6 +443,7 @@ int dispatcher_recv_handler(int sockfd, int flag)
 	ssize_t count;
 	int left_len = 0;
 	int ret = 0;
+	bool first_read = true;
 
 	memset(buf, 0, MAX_BUF);
 	while (1) {
@@ -395,13 +453,22 @@ int dispatcher_recv_handler(int sockfd, int flag)
 		}
 
 		if (count == 0) {
+			if (first_read && flag == 0) {
+				log_printf(LOG_ERROR, "miot_fd :%d is closed, will be reconnect\n", sockfd);
+				close(sockfd);
+				dispatcher.pollfds[0].fd = -1;
+				miot_fd = -1;
+			} else if (first_read && flag == 1) {
+				log_printf(LOG_ERROR, "sockfd :%d occurs error, delete from dispatcher\n", sockfd);
+				delete_fd_from_dispathcer(sockfd);
+			}
 			if (left_len) {
 				buf[left_len] = '\0';
 				log_printf(LOG_WARNING, "remain str: %s\n",buf);
 			}
 			return 0;
 		}
-
+		first_read = false;
 		ret = dispatcher_recv_handler_one(sockfd, buf, count + left_len, flag);
 		if (ret < 0) {
 			log_printf(LOG_ERROR, "dispatcher_recv_handler_one errors:%d\n", ret);
@@ -568,6 +635,30 @@ int register_event(int fd,  const char *key, int key_len)
 	return 1;
 }
 
+int delete_fd_from_dispathcer(int sockfd)
+{
+	int i;
+
+	unregister_fd(sockfd);
+	update_id_map(sockfd);
+
+	for (i = 0; i < dispatcher.count_pollfds; i++) {
+		if (dispatcher.pollfds[i].fd == sockfd)
+			break;
+	}
+
+	if (i == dispatcher.count_pollfds) return -1;
+
+	close(dispatcher.pollfds[i].fd);
+	while (i < dispatcher.count_pollfds - 1 && dispatcher.pollfds[i].fd) {
+		dispatcher.pollfds[i] = dispatcher.pollfds[i + 1];
+		i++;
+	}
+	dispatcher.pollfds[i].fd = -1;
+	dispatcher.count_pollfds--;
+	return 0;
+}
+
 /**
  * unregister fd from specific Node(event)
  */
@@ -649,16 +740,16 @@ void print_registered_event(void)
 	Node *p = key_list->next;
 	int i = 0;
 
-	log_printf(LOG_INFO, "=====================\n");
+	log_printf(LOG_DEBUG, "==========start===========\n");
 	while(p) {
-		log_printf(LOG_INFO, "%s\n", p->key);
+		log_printf(LOG_DEBUG, "%s\n", p->key);
 		for (i = 0; i < MAX_CLIENT_NUM && p->fd[i]; i++) {
-			log_printf(LOG_INFO, "%d, \n", p->fd[i]);
+			log_printf(LOG_DEBUG, "%d, \n", p->fd[i]);
 		}
-		log_printf(LOG_INFO, "\n");
+		log_printf(LOG_DEBUG, "\n");
 		p = p->next;
 	}
-	log_printf(LOG_INFO,"=====================\n");
+	log_printf(LOG_DEBUG,"===========end==========\n");
 }
 
 int send_to_register_client(char *msg, int msg_len)
@@ -685,9 +776,11 @@ int send_to_register_client(char *msg, int msg_len)
 		q = p->next;
 		while (i < MAX_CLIENT_NUM && q->fd[i]) {
 			ret = send(q->fd[i], msg, msg_len, 0);
-			log_printf(LOG_INFO,"send to registered fd :%d, ret is %d\n",  q->fd[i], ret);
+			log_printf(LOG_INFO,"send to registered fd: %d, send %d bytes\n",  q->fd[i], ret);
 			i++;
 		}
+	} else {
+		log_printf(LOG_WARNING,"no sockfd is registered with this method, msg is %s\n",  msg);
 	}
 	json_object_put(parse);
 	return ret;
@@ -779,6 +872,7 @@ int send_ack_to_client(char *msg)
 		msg_len = strlen(newmsg);
 
 		ret = send(fd, newmsg, msg_len, 0);
+		log_printf(LOG_INFO, "send ack to fd:%d, id is %d, length %d bytes\n", fd,  old_id, msg_len);
 		json_object_put(parse);
 	} else {
 		log_printf(LOG_WARNING, "id %d not found\n",  id);
@@ -801,8 +895,18 @@ void print_id_list(void)
 	log_printf(LOG_INFO, "=====================\n");
 }
 
-FILE *log_file;
-log_level_t g_loglevel = LOG_DEBUG;
+void logfile_init(char *filename)
+{
+	FILE *fp;
+
+	fp = fopen(filename, "a");
+	if (fp == NULL) {
+		log_printf(LOG_ERROR, "can't open %s: %m\n", filename);
+		return;
+	}
+
+	log_file = fp;
+}
 
 void log_printf(log_level_t level, const char *fmt, ...)
 {
@@ -830,9 +934,9 @@ void log_printf(log_level_t level, const char *fmt, ...)
 		strftime(buf, 80, "[%Y%m%d %H:%M:%S]", p);
 
 		va_start(ap, fmt);
-		fprintf(stdout, "%s %s ", buf, slevel);
-		vfprintf(stdout, fmt, ap);
+		fprintf(log_file, "%s %s ", buf, slevel);
+		vfprintf(log_file, fmt, ap);
 		va_end(ap);
-		fflush(stdout);
+		fflush(log_file);
 	}
 }
