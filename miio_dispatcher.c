@@ -2,6 +2,8 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdint.h>
+#include <signal.h>
+#include <unistd.h>
 #include <time.h>
 #include <sys/timerfd.h>
 #include <assert.h>
@@ -22,9 +24,27 @@ LinkList *key_list = NULL;
 IDLinkList *id_list = NULL;
 int new_id = MIN_ID_NUM;
 
+static void sighandler(int sig)
+{
+	free_key_list();
+	free_id_list();
+
+	if (miot_fd >0) {
+		close(miot_fd);
+	}
+	if(dispatch_listenfd > 0)
+		close(dispatch_listenfd);
+
+	log_printf(LOG_ERROR, "miio_dispatcher will be exit\n");
+	exit(-1);
+}
+
 int main(int argc, char const *argv[])
 {
 	int n = 0;
+
+	signal(SIGINT, sighandler);
+	signal(SIGPIPE, SIG_IGN);
 
 	miot_fd = miot_connect_init();
 	dispatch_listenfd = dispatch_server_init();
@@ -58,7 +78,7 @@ int main(int argc, char const *argv[])
 	timer_start(timer_fd, TIMER_INTERVAL, TIMER_INTERVAL);
 	dispatcher.pollfds[dispatcher.count_pollfds].fd = timer_fd;
 	dispatcher.pollfds[dispatcher.count_pollfds].events = POLLIN;
-	log_printf(LOG_INFO, "dispatcher listen fd: %d\n", dispatcher.pollfds[dispatcher.count_pollfds].fd);
+	log_printf(LOG_INFO, "timer fd: %d\n", dispatcher.pollfds[dispatcher.count_pollfds].fd);
 	dispatcher.count_pollfds++;
 
 	while (n >= 0) {
@@ -220,11 +240,11 @@ int miot_msg_handler(char *msg, int msg_len)
 
 	if (json_verify_method(msg, "method") == 0) {
 		/* It's a command msg */
-		log_printf(LOG_DEBUG, "cloud/mobile cmd: %s,len: %d\n", msg, msg_len);
+		//log_printf(LOG_DEBUG, "cloud/mobile cmd: %s,len: %d\n", msg, msg_len);
 		ret = send_to_register_client(msg, msg_len);
 	} else {
 		/* It's a report ACK msg */
-		log_printf(LOG_DEBUG, "cloud ack: %s, len: %d\n", msg, msg_len);
+		//log_printf(LOG_DEBUG, "cloud ack: %s, len: %d\n", msg, msg_len);
 		ret = send_ack_to_client(msg);
 	}
 	return ret;
@@ -242,7 +262,7 @@ int client_msg_handler(char *msg, int len, int sockfd)
 	int ret, old_id;
 	int fd = miot_fd;
 
-	log_printf(LOG_DEBUG,"msg is %s\n", msg);
+	//log_printf(LOG_DEBUG,"msg is %s, len is %d\n", msg, len);
 	if (json_verify_method(msg, "method") == 0 ) {
 		struct json_object *save_obj, *new_obj, *tmp_obj;
 		const char *str,*key;
@@ -285,7 +305,7 @@ int client_msg_handler(char *msg, int len, int sockfd)
 			json_object_object_add(save_obj, "id", json_object_new_int(++new_id));
 			newmsg = (char *)json_object_to_json_string_ext(save_obj, JSON_C_TO_STRING_PLAIN);
 			msg_len = strlen(newmsg);
-			log_printf(LOG_DEBUG, "newmsg is %s\n", newmsg);
+			log_printf(LOG_DEBUG, "newmsg id %d, len %d\n", new_id, msg_len);
 			record_id_map(old_id, new_id, sockfd);
 			ret = send(fd, newmsg, msg_len, 0);
 		} else {
@@ -367,6 +387,7 @@ int dispatcher_recv_handler(int sockfd, int flag)
 	int left_len = 0;
 	int ret = 0;
 
+	memset(buf, 0, MAX_BUF);
 	while (1) {
 		count = recv(sockfd, buf + left_len, sizeof(buf) - left_len, MSG_DONTWAIT);
 		if (count < 0) {
@@ -440,6 +461,18 @@ Node *init_key_list(void)
 	return pHead;
 }
 
+void free_key_list(void)
+{
+	LinkList *p = key_list;
+	LinkList *q;
+
+	while(p) {
+		q = p;
+		p = p->next;
+		free(q);
+	}
+}
+
 ID_Node *init_id_list(void)
 {
 	IDLinkList *pHead = NULL;
@@ -455,9 +488,9 @@ ID_Node *init_id_list(void)
 	return pHead;
 }
 
-void clear_id_list(void)
+void free_id_list(void)
 {
-	IDLinkList *p = id_list->next;
+	IDLinkList *p = id_list;
 	IDLinkList *q;
 
 	while(p) {

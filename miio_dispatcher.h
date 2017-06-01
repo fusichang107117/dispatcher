@@ -8,11 +8,11 @@
 #define POLL_TIMEOUT			100	/* 100ms */
 #define MAX_CLIENT_NUM		20
 #define MAX_POLL_FDS			(MAX_CLIENT_NUM + 3)
-#define MAX_BUF			1024
+#define MAX_BUF			4096
 #define TIMER_INTERVAL		3000	/* 3s */
 
 #define MAX_KEY_NUM			100
-#define MAX_KEY_LEN			16
+#define MAX_KEY_LEN			32
 #define KEY_NUM_INDEX		0
 
 #define MIN_ID_NUM			5000
@@ -54,7 +54,10 @@ typedef struct ID_Node IDLinkList;
 
 
 Node *init_key_list(void);
+void free_key_list(void);
+
 ID_Node *init_id_list(void);
+void free_id_list(void);
 
 int  miot_connect_init(void);
 int  dispatch_server_init(void);
