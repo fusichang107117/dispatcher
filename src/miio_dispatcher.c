@@ -18,6 +18,7 @@
 #include "miio_json.h"
 #include <netinet/in.h>
 #include <arpa/inet.h>
+#include "config.h"
 #include "miio_dispatcher.h"
 
 FILE *log_file;
@@ -77,10 +78,16 @@ int main(int argc, char *argv[])
 				logfile_init(optarg);
 				break;
 			case 'v':
-				fprintf(stdout, "%s\n", VERSION);
+				fprintf(stdout, "%s\n", PACKAGE_STRING);
 				exit(1);
 			case 'h':
 			default:
+				fprintf(stderr, "miio dispatcher - MIIO OT messages dispatcher protocol implementation\n"
+				"Copyright (C) Xiaomi\n"
+				"Author: Fu Sichang <fusichang@xiaomi.com>\n"
+				"Version: %s\n"
+				"Build time: %s %s\n", PACKAGE_STRING, __TIME__, __DATE__);
+				fprintf(stderr, "\n");
 				fprintf(stderr, "Usage: %s\n"
 				"\t[-D --daemonize]\n"
 				"\t[-l --loglevel=<level>] set loglevel (0-4), bigger = more verbose\n"
