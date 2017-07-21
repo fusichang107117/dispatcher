@@ -239,7 +239,7 @@ int  dispatch_server_init(void)
 	}
 	return dispatch_listenfd;
 }
-
+int i;
 void timer_handler(int fd)
 {
 	uint64_t exp = 0;
@@ -251,6 +251,13 @@ void timer_handler(int fd)
 	if (miot_fd <= 0) {
 		miot_fd = miot_connect_init();
 		agent.pollfds[0].fd = miot_fd;
+	}
+
+	i++;
+	if (i % 40 == 0) {
+		update_id_tree();
+		print_registered_key();
+		print_id_tree();
 	}
 }
 
@@ -379,6 +386,7 @@ int client_msg_handler(char *msg, int len, int sockfd)
 			p->new_id = new_id;
 			p->old_id = old_id;
 			p->fd = sockfd;
+			p->ts= time(NULL);
 			//record_id_map(old_id, new_id, sockfd);
 			id_insert(&id_tree, p);
 		} else {
@@ -660,12 +668,12 @@ int remove_key_within_fd(int fd,  const char *key)
 	int ret = -1;
 	key_found = key_search(&key_tree, key, &p);
 	if (key_found == 0) {
-		printf("Key not found: %s\n", key);
+		log_printf(LOG_WARNING, "Key not found: %s\n", key);
 		return ret;
 	}
 	ret = remove_fd_from_keynode(p, fd);
 	if (ret < 0) {
-		printf("fd %d not found with the key %s\n", fd, key);
+		log_printf(LOG_WARNING, "fd %d not found with the key %s\n", fd, key);
 	}
 	return ret;
 }
@@ -699,7 +707,7 @@ void print_registered_key(void)
 	log_printf(LOG_DEBUG, "===search all key_tree nodes start===\n");
 	for (node = rb_first(&key_tree); node; node = rb_next(node)) {
 		p = rb_entry(node, struct key_node, node);
-		printf("key = %s\n", p->key);
+		log_printf(LOG_DEBUG,"key = %s\n", p->key);
 		for (i = 0; i < MAX_CLIENT_NUM && p->fd[i]; i++) {
 			log_printf(LOG_DEBUG, "%d, \n", p->fd[i]);
 		}
@@ -793,15 +801,10 @@ int id_search(struct rb_root *root, int new_id, struct id_node **pNode)
 	return 0;
 }
 
-/*
-*remove invaild id
-*/
-//void update_id_map(int fd)
 void remove_fd_from_idtree(int fd)
 {
 	struct rb_node *node;
 	struct id_node *p;
-	int ret;
 
 	node = rb_first(&id_tree);
 	while (node) {
@@ -816,6 +819,27 @@ void remove_fd_from_idtree(int fd)
 	}
 }
 
+/*
+*remove invaild id
+*/
+void update_id_tree(void)
+{
+	struct rb_node *node;
+	struct id_node *p;
+	unsigned int now = time(NULL);
+
+	node = rb_first(&id_tree);
+	while (node) {
+		p = rb_entry(node, struct id_node, node);
+		if (now > p->ts + MAX_VALID_TIME) {
+			rb_erase(&p->node, &id_tree);
+			free(p);
+			node = rb_first(&id_tree);
+			continue;
+		}
+		node = rb_next(node);
+	}
+}
 
 void remove_id_node(struct id_node *p)
 {

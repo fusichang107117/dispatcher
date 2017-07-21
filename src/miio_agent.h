@@ -13,9 +13,10 @@
 #define MAX_BUF			4096
 #define TIMER_INTERVAL		3000	/* 3s */
 
-#define MAX_KEY_NUM			100
+#define MAX_KEY_NUM		100
 #define MAX_KEY_LEN			32
 #define KEY_NUM_INDEX		0
+#define MAX_VALID_TIME		180
 
 #define MAX_ID_NUM			2147483647
 
@@ -39,6 +40,7 @@ typedef struct id_node
 	int new_id;
 	int old_id;
 	int fd;
+	unsigned int ts;
 }ID_Node;
 
 typedef enum
@@ -79,6 +81,7 @@ void remove_id_node(struct id_node *p);
 void remove_fd_from_idtree(int fd);
 void print_id_tree(void);
 void free_id_tree(void);
+void update_id_tree(void);
 
 int delete_fd_from_dispathcer(int sockfd);
 
