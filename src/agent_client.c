@@ -41,7 +41,7 @@ int main(int argc, char**argv)
 		printf("Connect to server error: %s:%d\n", SERVER_IP, SERVER_PORT);
 		return -1;
 	}
-	
+
 	n = send(sockfd, reg_template1, strlen(reg_template1), 0);
 	printf("reg key:%s send ret : %d\n", reg_template1, n);
 
@@ -52,6 +52,6 @@ int main(int argc, char**argv)
 		n = recv(sockfd, buf, sizeof(buf), 0);
 		printf("client1 recv msg is %s\n", buf);
 	}
-	
+
 	return 0;
 }

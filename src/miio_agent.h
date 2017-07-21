@@ -1,6 +1,8 @@
 #ifndef __MIIO_H
 #define __MIIO_H
 
+#include "rbtree.h"
+
 #define SERVER_IP	"127.0.0.1"
 #define MIOT_SERVER_PORT	54322
 #define DISPATCHER_SERVER_PORT	54320
@@ -19,25 +21,24 @@
 
 #define VERSION			"1.0"
 
-struct dispatcher_data
+struct agent_info
 {
 	struct pollfd pollfds[MAX_POLL_FDS];
 	int count_pollfds;
 };
 
-typedef struct Node
-{
+typedef struct key_node {
+	struct rb_node node;
 	char key[MAX_KEY_LEN];
 	int fd[MAX_CLIENT_NUM];
-	struct Node *next;
 }Node;
 
-typedef struct ID_Node
+typedef struct id_node
 {
+	struct rb_node node;
 	int new_id;
 	int old_id;
 	int fd;
-	struct ID_Node *next;
 }ID_Node;
 
 typedef enum
@@ -50,22 +51,12 @@ typedef enum
 	LOG_LEVEL_MAX = LOG_VERBOSE
 } log_level_t;
 
-typedef struct Node LinkList;
-typedef struct ID_Node IDLinkList;
-
-
-Node *init_key_list(void);
-void free_key_list(void);
-
-ID_Node *init_id_list(void);
-void free_id_list(void);
-
 int  miot_connect_init(void);
 int  dispatch_server_init(void);
 
-int dispatcher_listen_handler(int listenfd);
-int dispatcher_recv_handler(int sockfd, int flag);
-int dispatcher_recv_handler_one(int sockfd, char *msg, int msg_len, int flag);
+int agent_listen_handler(int listenfd);
+int agent_recv_handler(int sockfd, int flag);
+int agent_recv_handler_one(int sockfd, char *msg, int msg_len, int flag);
 
 int miot_msg_handler(char *msg, int msg_len);
 int client_msg_handler(char *msg, int len, int sockfd);
@@ -74,16 +65,22 @@ int timer_setup(void);
 void timer_handler(int fd);
 int timer_start(int fd, int first_expire, int interval);
 
-int record_id_map(int old_id, int new_id, int fd);
-void update_id_map(int fd);
+int key_search(struct rb_root *root, const char *key, struct key_node **pNode);
+int key_insert(struct rb_root *root, const char *key, int fd);
+int remove_fd_from_keynode(struct key_node *pNode, int fd);
+void remove_fd_from_keytree(int fd);
+int remove_key_within_fd(int fd,  const char *key);
+void print_registered_key(void);
+void free_key_tree(void);
 
-int get_event_last_node(const char *key, int key_len, Node **pNode);
-int register_event(int fd,  const char *key, int key_len);
-int unregister_fd_from_Node(Node *pNode, int fd);
-int unregister_event(int fd,  const char *key, int key_len);
-void unregister_fd(int fd);
+int id_insert(struct rb_root *root, struct id_node *pNode);
+int id_search(struct rb_root *root, int new_id, struct id_node **pNode);
+void remove_id_node(struct id_node *p);
+void remove_fd_from_idtree(int fd);
+void print_id_tree(void);
+void free_id_tree(void);
+
 int delete_fd_from_dispathcer(int sockfd);
-void print_registered_event(void);
 
 int send_to_register_client(char *msg, int msg_len);
 int send_ack_to_client(char *msg);

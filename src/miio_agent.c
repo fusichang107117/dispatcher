@@ -18,16 +18,18 @@
 #include "miio_json.h"
 #include <netinet/in.h>
 #include <arpa/inet.h>
+#include "rbtree.h"
 #include "config.h"
-#include "miio_dispatcher.h"
+#include "miio_agent.h"
 
 FILE *log_file;
 log_level_t g_loglevel = LOG_DEBUG;
 
 int miot_fd, dispatch_listenfd, timer_fd;
-struct dispatcher_data dispatcher;
-LinkList *key_list = NULL;
-IDLinkList *id_list = NULL;
+struct agent_info agent;
+
+struct rb_root key_tree = RB_ROOT;
+struct rb_root id_tree = RB_ROOT;
 
 static struct option options[] = {
 	{"help",	no_argument,		NULL, 'h'},
@@ -40,8 +42,8 @@ static struct option options[] = {
 
 static void sighandler(int sig)
 {
-	free_key_list();
-	free_id_list();
+	free_key_tree();
+	free_id_tree();
 
 	if (miot_fd >0) {
 		close(miot_fd);
@@ -49,7 +51,7 @@ static void sighandler(int sig)
 	if(dispatch_listenfd > 0)
 		close(dispatch_listenfd);
 
-	log_printf(LOG_ERROR, "miio_dispatcher will be exit\n");
+	log_printf(LOG_ERROR, "miio_agent will be exit\n");
 	exit(-1);
 }
 
@@ -82,7 +84,7 @@ int main(int argc, char *argv[])
 				exit(1);
 			case 'h':
 			default:
-				fprintf(stderr, "miio dispatcher - MIIO OT messages dispatcher protocol implementation\n"
+				fprintf(stderr, "miio agent - MIIO OT messages agent protocol implementation\n"
 				"Copyright (C) Xiaomi\n"
 				"Author: Fu Sichang <fusichang@xiaomi.com>\n"
 				"Version: %s\n"
@@ -109,32 +111,26 @@ int main(int argc, char *argv[])
 		return -1;
 	}
 
-	key_list = init_key_list();
-	id_list =  init_id_list();
-	if (key_list == NULL || id_list == NULL) {
-		return -1;
-	}
+	memset(&agent, 0, sizeof(agent));
 
-	memset(&dispatcher, 0, sizeof(dispatcher));
+	agent.pollfds[agent.count_pollfds].fd = miot_fd;
+	agent.pollfds[agent.count_pollfds].events = POLLIN;
+	log_printf(LOG_INFO, "miot client fd: %d\n", agent.pollfds[agent.count_pollfds].fd);
+	agent.count_pollfds++;
 
-	dispatcher.pollfds[dispatcher.count_pollfds].fd = miot_fd;
-	dispatcher.pollfds[dispatcher.count_pollfds].events = POLLIN;
-	log_printf(LOG_INFO, "miot client fd: %d\n", dispatcher.pollfds[dispatcher.count_pollfds].fd);
-	dispatcher.count_pollfds++;
-
-	dispatcher.pollfds[dispatcher.count_pollfds].fd = dispatch_listenfd;
-	dispatcher.pollfds[dispatcher.count_pollfds].events = POLLIN;
-	log_printf(LOG_INFO, "dispatcher listen fd: %d\n", dispatcher.pollfds[dispatcher.count_pollfds].fd);
-	dispatcher.count_pollfds++;
+	agent.pollfds[agent.count_pollfds].fd = dispatch_listenfd;
+	agent.pollfds[agent.count_pollfds].events = POLLIN;
+	log_printf(LOG_INFO, "agent listen fd: %d\n", agent.pollfds[agent.count_pollfds].fd);
+	agent.count_pollfds++;
 
 	/* timer */
 	timer_fd = timer_setup();
 	assert(timer_fd > 0);
 	timer_start(timer_fd, TIMER_INTERVAL, TIMER_INTERVAL);
-	dispatcher.pollfds[dispatcher.count_pollfds].fd = timer_fd;
-	dispatcher.pollfds[dispatcher.count_pollfds].events = POLLIN;
-	log_printf(LOG_INFO, "timer fd: %d\n", dispatcher.pollfds[dispatcher.count_pollfds].fd);
-	dispatcher.count_pollfds++;
+	agent.pollfds[agent.count_pollfds].fd = timer_fd;
+	agent.pollfds[agent.count_pollfds].events = POLLIN;
+	log_printf(LOG_INFO, "timer fd: %d\n", agent.pollfds[agent.count_pollfds].fd);
+	agent.count_pollfds++;
 
 	if (daemonize)
 		if (daemon(0, 1) < 0)
@@ -143,39 +139,41 @@ int main(int argc, char *argv[])
 
 	while (n >= 0) {
 		int i;
-		n = poll(dispatcher.pollfds, dispatcher.count_pollfds, POLL_TIMEOUT);
+		n = poll(agent.pollfds, agent.count_pollfds, POLL_TIMEOUT);
 		if (n <= 0) {
 			continue;
 		}
 
-		for (i = 0; i < dispatcher.count_pollfds && n > 0; i++) {
-			if (dispatcher.pollfds[i].revents & (POLLNVAL | POLLHUP | POLLERR)) {
+		for (i = 0; i < agent.count_pollfds && n > 0; i++) {
+			if (agent.pollfds[i].revents & (POLLNVAL | POLLHUP | POLLERR)) {
 				int j = i;
-				log_printf(LOG_DEBUG, "dispatcher.pollfds[i].revents: %08x, %d\n",dispatcher.pollfds[i].revents, dispatcher.pollfds[i].fd);
-				if (dispatcher.pollfds[i].fd == miot_fd) {
+				log_printf(LOG_DEBUG, "agent.pollfds[i].revents: %08x, %d\n",agent.pollfds[i].revents, agent.pollfds[i].fd);
+				if (agent.pollfds[i].fd == miot_fd) {
 					close(miot_fd);
-					dispatcher.pollfds[i].fd = -1;
+					agent.pollfds[i].fd = -1;
 					miot_fd = -1;
 					continue;
 				}
-				if (dispatcher.pollfds[i].fd == dispatch_listenfd) {
+				if (agent.pollfds[i].fd == dispatch_listenfd) {
 					continue;
 				}
-				delete_fd_from_dispathcer(dispatcher.pollfds[i].fd);
+				delete_fd_from_dispathcer(agent.pollfds[i].fd);
 				n--;
-			} else if (dispatcher.pollfds[i].revents & POLLIN) {
-				if (dispatcher.pollfds[i].fd == timer_fd)
+			} else if (agent.pollfds[i].revents & POLLIN) {
+				if (agent.pollfds[i].fd == timer_fd)
 					timer_handler(timer_fd);
-				else if (dispatcher.pollfds[i].fd == miot_fd)
-					dispatcher_recv_handler(miot_fd, 0);
-				else if (dispatcher.pollfds[i].fd == dispatch_listenfd)
-					dispatcher_listen_handler(dispatch_listenfd);
+				else if (agent.pollfds[i].fd == miot_fd)
+					agent_recv_handler(miot_fd, 0);
+				else if (agent.pollfds[i].fd == dispatch_listenfd)
+					agent_listen_handler(dispatch_listenfd);
 				else
-					dispatcher_recv_handler(dispatcher.pollfds[i].fd, 1);
+					agent_recv_handler(agent.pollfds[i].fd, 1);
 				n--;
 			}
 		}
 	}
+	free_key_tree();
+	free_id_tree();
 	return 0;
 }
 
@@ -252,14 +250,14 @@ void timer_handler(int fd)
 
 	if (miot_fd <= 0) {
 		miot_fd = miot_connect_init();
-		dispatcher.pollfds[0].fd = miot_fd;
+		agent.pollfds[0].fd = miot_fd;
 	}
 }
 
 /*
 *listen connect from client
 */
-int dispatcher_listen_handler(int listenfd)
+int agent_listen_handler(int listenfd)
 {
 	int newfd;
 	struct sockaddr_storage other_addr;
@@ -271,16 +269,16 @@ int dispatcher_listen_handler(int listenfd)
 			break;
 		}
 		 //add into poll 
-		if (dispatcher.count_pollfds >= MAX_POLL_FDS) {
+		if (agent.count_pollfds >= MAX_POLL_FDS) {
 			log_printf(LOG_ERROR, "too many sockets to track\n");
 			return -1;
 		}
 
-		dispatcher.pollfds[dispatcher.count_pollfds].fd = newfd;
-		dispatcher.pollfds[dispatcher.count_pollfds].events = POLLIN;
+		agent.pollfds[agent.count_pollfds].fd = newfd;
+		agent.pollfds[agent.count_pollfds].events = POLLIN;
 		log_printf(LOG_INFO, "OT agent listen accept sockfd: %d\n",
-			   dispatcher.pollfds[dispatcher.count_pollfds].fd);
-		dispatcher.count_pollfds++;
+			   agent.pollfds[agent.count_pollfds].fd);
+		agent.count_pollfds++;
 	}
 	return 0;
 }
@@ -342,7 +340,8 @@ int client_msg_handler(char *msg, int len, int sockfd)
 			if (json_object_is_type(tmp_obj, json_type_string)) {
 				key = json_object_get_string(tmp_obj);
 				log_printf(LOG_DEBUG, "register key: %s, fd: %d\n", key, sockfd);
-				register_event(sockfd, key, strlen(key));
+				//register_event(sockfd, key, strlen(key));
+				key_insert(&key_tree, key, sockfd);
 				ret = 0;
 			}
 		} else if (memcmp(str, "unregister", strlen("unregister")) == 0) {
@@ -353,16 +352,19 @@ int client_msg_handler(char *msg, int len, int sockfd)
 				key_len = strlen(key);
 				if (key_len == 0) {
 					log_printf(LOG_DEBUG, "unregister all,fd: %d\n", sockfd);
-					unregister_fd(sockfd);
+					//unregister_fd(sockfd);
+					remove_fd_from_keytree(sockfd);
 				} else {
 					log_printf(LOG_DEBUG, "unregister key: %s, fd: %d\n", key, sockfd);
-					unregister_event(sockfd, key, strlen(key));
+					//unregister_event(sockfd, key, strlen(key));
+					remove_key_within_fd(sockfd,  key);
 				}
 				ret = 0;
 			}
 		} else if (json_verify_get_int(msg, "id", &old_id) == 0 ) {
 			int msg_len;
 			char *newmsg;
+			struct id_node *p;
 			int new_id = get_newid();
 			/* replace with new id */
 			json_object_object_del(save_obj, "id");
@@ -370,8 +372,15 @@ int client_msg_handler(char *msg, int len, int sockfd)
 			newmsg = (char *)json_object_to_json_string_ext(save_obj, JSON_C_TO_STRING_PLAIN);
 			msg_len = strlen(newmsg);
 			log_printf(LOG_DEBUG, "newmsg  id %d, len %d\n", new_id, msg_len);
-			record_id_map(old_id, new_id, sockfd);
 			ret = send(fd, newmsg, msg_len, 0);
+
+			p = (struct id_node *)malloc(sizeof(struct id_node));
+			memset(p, 0, sizeof(struct id_node));
+			p->new_id = new_id;
+			p->old_id = old_id;
+			p->fd = sockfd;
+			//record_id_map(old_id, new_id, sockfd);
+			id_insert(&id_tree, p);
 		} else {
 			ret = send(fd, msg, len, 0);
 		}
@@ -388,7 +397,7 @@ int client_msg_handler(char *msg, int len, int sockfd)
  *
  * return the length we've consumed, -1 on error
  */
-int dispatcher_recv_handler_one(int sockfd, char *msg, int msg_len, int flag)
+int agent_recv_handler_one(int sockfd, char *msg, int msg_len, int flag)
 {
 	struct json_tokener *tok;
 	struct json_object *json;
@@ -444,7 +453,7 @@ int dispatcher_recv_handler_one(int sockfd, char *msg, int msg_len, int flag)
 *flag = 0 means from miot
 *flag = 1 means from clientfd
 */
-int dispatcher_recv_handler(int sockfd, int flag)
+int agent_recv_handler(int sockfd, int flag)
 {
 	char buf[MAX_BUF];
 	ssize_t count;
@@ -463,10 +472,10 @@ int dispatcher_recv_handler(int sockfd, int flag)
 			if (first_read && flag == 0) {
 				log_printf(LOG_ERROR, "miot_fd :%d is closed, will be reconnect\n", sockfd);
 				close(sockfd);
-				dispatcher.pollfds[0].fd = -1;
+				agent.pollfds[0].fd = -1;
 				miot_fd = -1;
 			} else if (first_read && flag == 1) {
-				log_printf(LOG_ERROR, "sockfd :%d occurs error, delete from dispatcher\n", sockfd);
+				log_printf(LOG_ERROR, "sockfd :%d occurs error, delete from agent\n", sockfd);
 				delete_fd_from_dispathcer(sockfd);
 			}
 			if (left_len) {
@@ -476,9 +485,9 @@ int dispatcher_recv_handler(int sockfd, int flag)
 			return 0;
 		}
 		first_read = false;
-		ret = dispatcher_recv_handler_one(sockfd, buf, count + left_len, flag);
+		ret = agent_recv_handler_one(sockfd, buf, count + left_len, flag);
 		if (ret < 0) {
-			log_printf(LOG_ERROR, "dispatcher_recv_handler_one errors:%d\n", ret);
+			log_printf(LOG_ERROR, "agent_recv_handler_one errors:%d\n", ret);
 			return -1;
 		}
 
@@ -519,160 +528,102 @@ int timer_start(int fd, int first_expire, int interval)
 	return 0;
 }
 
-Node *init_key_list(void)
+int insert_fd_within_key(struct key_node *pNode, int fd)
 {
-	LinkList *pHead = NULL;
-
-	pHead = (LinkList *)malloc(sizeof(LinkList));
-	if (pHead == NULL) {
-		log_printf(LOG_ERROR, "init_key_list ERROR\n") ;
-		return NULL;
+	int i = 0;
+	while(i < MAX_CLIENT_NUM - 1 && pNode->fd[i]) {
+		if (fd == pNode->fd[i])
+			return 0;
+		i++;
 	}
-
-	memset(pHead, 0, sizeof(LinkList));
-	pHead->next = NULL;
-
-	return pHead;
-}
-
-void free_key_list(void)
-{
-	LinkList *p = key_list;
-	LinkList *q;
-
-	while(p) {
-		q = p;
-		p = p->next;
-		free(q);
-	}
-}
-
-ID_Node *init_id_list(void)
-{
-	IDLinkList *pHead = NULL;
-
-	pHead = (IDLinkList *)malloc(sizeof(IDLinkList));
-	if (pHead == NULL) {
-		log_printf(LOG_ERROR, "init_id_list ERROR\n") ;
-		return NULL;
-	}
-	memset(pHead, 0, sizeof(IDLinkList));
-	pHead->next = NULL;
-
-	return pHead;
-}
-
-void free_id_list(void)
-{
-	IDLinkList *p = id_list;
-	IDLinkList *q;
-
-	while(p) {
-		q = p;
-		p = p->next;
-		free(q);
-	}
-}
-
-/**
- * judge if key is match, if match, return 1 and the pointer of last node
- */
-int get_event_last_node(const char *key, int key_len, Node **pNode)
-{
-	int ret = 0;
-	Node *p = key_list;
-
-	while(p->next) {
-		if (memcmp(p->next->key, key, key_len) == 0) {
-			ret = 1;
-			break;
-		}
-		p = p->next;
-	}
-	*pNode = p;
-	return ret;
-}
-/**
- * register the interesting event with fd
- * key: interested event;
- */
-int register_event(int fd,  const char *key, int key_len)
-{
-	int i, key_found = 0;
-	Node *pHead = key_list;
-	Node *p , *q;
-
-	if (key_len > MAX_KEY_LEN || key_len <= 0) {
-		log_printf(LOG_ERROR, "key length is error (%d/1~%d)\n", key_len, MAX_KEY_LEN);
-		return -1;
-	}
-
-	 if (pHead->fd[KEY_NUM_INDEX] >= MAX_KEY_NUM) {
-		log_printf(LOG_ERROR, "key is full, please unregister first\n");
-		return -1;
-	}
-
-	key_found = get_event_last_node(key, key_len, &p);
-	if (key_found == 1) {
-		q = p->next;
-		for (i = 0; i < MAX_CLIENT_NUM && q->fd[i]; i++) {
-			if (q->fd[i] == fd) {
-				log_printf(LOG_WARNING, "fd %d is already registered with key \"%s\"\n", q->fd[i], q->key);
-				return 1;
-			}
-		}
-		if (i == MAX_CLIENT_NUM) {
-			log_printf(LOG_ERROR, "fd is full with key \"%s\", please unregister first\n", key);
-			return -1;
-		}
-		q->fd[i] = fd;
-	} else {
-		q = (Node *)malloc(sizeof(Node));
-		if (q == NULL) {
-			return -1;
-		}
-		memset(q, 0, sizeof(LinkList));
-		q->next = NULL;
-		q->fd[0] = fd;	
-		memcpy(q->key, key, key_len);
-
-		p->next = q;
-		pHead->fd[KEY_NUM_INDEX] += 1;
-	}
+	pNode->fd[i] = fd;
 	return 1;
+}
+
+/**
+ * register the interesting key with fd
+ */
+int key_insert(struct rb_root *root, const char *key, int fd)
+{
+	struct rb_node **new = &(root->rb_node), *parent = NULL;
+
+	/* Figure out where to put new node */
+	while (*new) {
+		struct key_node *this = container_of(*new, struct key_node, node);
+		int result = strcmp(key, this->key);
+
+		parent = *new;
+		if (result < 0)
+			new = &((*new)->rb_left);
+		else if (result > 0)
+			new = &((*new)->rb_right);
+		else {
+			return insert_fd_within_key(this, fd);
+		}
+	}
+	struct key_node *p;
+	p = (struct key_node *)malloc(sizeof(struct key_node));
+	memset(p, 0, sizeof(struct key_node));
+	strcpy(p->key, key);
+	p->fd[0] = fd;
+	/* Add new node and rebalance tree. */
+	rb_link_node(&p->node, parent, new);
+	rb_insert_color(&p->node, root);
+
+	return 1;
+}
+
+int key_search(struct rb_root *root, const char *key, struct key_node **pNode)
+{
+	struct rb_node *node = root->rb_node;
+
+	while (node) {
+		struct key_node *this = container_of(node, struct key_node, node);
+		int result = strcmp(key, this->key);
+
+		if (result < 0)
+			node = node->rb_left;
+		else if (result > 0)
+			node = node->rb_right;
+		else {
+			*pNode = this;
+			return 1;
+		}
+	}
+	return 0;
 }
 
 int delete_fd_from_dispathcer(int sockfd)
 {
 	int i;
 
-	unregister_fd(sockfd);
-	update_id_map(sockfd);
+	remove_fd_from_keytree(sockfd);
+	remove_fd_from_idtree(sockfd);
 
-	for (i = 0; i < dispatcher.count_pollfds; i++) {
-		if (dispatcher.pollfds[i].fd == sockfd)
+	for (i = 0; i < agent.count_pollfds; i++) {
+		if (agent.pollfds[i].fd == sockfd)
 			break;
 	}
 
-	if (i == dispatcher.count_pollfds) return -1;
+	if (i == agent.count_pollfds) return -1;
 
-	close(dispatcher.pollfds[i].fd);
-	while (i < dispatcher.count_pollfds - 1 && dispatcher.pollfds[i].fd) {
-		dispatcher.pollfds[i] = dispatcher.pollfds[i + 1];
+	close(agent.pollfds[i].fd);
+	while (i < agent.count_pollfds - 1 && agent.pollfds[i].fd) {
+		agent.pollfds[i] = agent.pollfds[i + 1];
 		i++;
 	}
-	dispatcher.pollfds[i].fd = -1;
-	dispatcher.count_pollfds--;
+	agent.pollfds[i].fd = -1;
+	agent.count_pollfds--;
 	return 0;
 }
 
 /**
- * unregister fd from specific Node(event)
+ * unregister fd from specific key_node
  */
-int unregister_fd_from_Node(Node *pNode, int fd)
+int remove_fd_from_keynode(struct key_node *pNode, int fd)
 {
 	int i, fd_found = 0, ret = -1;
-	Node *q = pNode;
+	struct key_node *q = pNode;
 
 	for (i = 0; i < MAX_CLIENT_NUM && q->fd[i]; i++) {
 		if (fd == q->fd[i]) {
@@ -690,6 +641,8 @@ int unregister_fd_from_Node(Node *pNode, int fd)
 		q->fd[i] = 0;
 		/*the key just has one fd, free it*/
 		if (q->fd[0] == 0) {
+			//printf("key is %s, fd is %d\n", q->key, fd);
+			rb_erase(&q->node, &key_tree);
 			free(q);
 			ret = 1;
 		}
@@ -698,72 +651,67 @@ int unregister_fd_from_Node(Node *pNode, int fd)
 }
 
 /**
- * unregister the interesting event with fd
- * key: interesting event;
+ * unregister the interesting key with fd
  */
-int unregister_event(int fd,  const char *key, int key_len)
+int remove_key_within_fd(int fd,  const char *key)
 {
-	int key_found = 0;
+	struct key_node *p;
+	int key_found;
 	int ret = -1;
-	Node *p, *q;
-
-	key_found = get_event_last_node(key, key_len, &p);
+	key_found = key_search(&key_tree, key, &p);
 	if (key_found == 0) {
-		log_printf(LOG_ERROR, "Key not found: %s\n", key);
+		printf("Key not found: %s\n", key);
 		return ret;
 	}
-
-	q = p->next->next;
-	ret = unregister_fd_from_Node(p->next, fd);
-	if (ret == 1)
-		p->next = q;
-	else if (ret < 0)
-		log_printf(LOG_ERROR, "fd %d not found with the key %s\n", fd, key);
+	ret = remove_fd_from_keynode(p, fd);
+	if (ret < 0) {
+		printf("fd %d not found with the key %s\n", fd, key);
+	}
 	return ret;
 }
-
 /**
- * unregister all interesting event with fd
+ * unregister all interesting key with fd
  */
-void unregister_fd(int fd)
+void remove_fd_from_keytree(int fd)
 {
-	Node *p = key_list;
-	Node *q;
-	int free;
-	log_printf(LOG_DEBUG, "unregister_fd :%d\n", fd);
-	while(p->next) {
-		q = p->next->next;
-		free = unregister_fd_from_Node(p->next, fd);
-		if (free == 1) {
-			p->next = q;
-		} else {
-			p = p->next;
+	struct rb_node *node;
+	struct key_node *p;
+	int ret;
+
+	node = rb_first(&key_tree);
+	while (node) {
+		p = rb_entry(node, struct key_node, node);
+		ret = remove_fd_from_keynode(p, fd);
+		if (ret == 1) {
+			node = rb_first(&key_tree);
+			continue;
 		}
+		node = rb_next(node);
 	}
 }
 
-void print_registered_event(void)
+void print_registered_key(void)
 {
-	Node *p = key_list->next;
+	struct rb_node *node;
+	struct key_node *p;
 	int i = 0;
 
-	log_printf(LOG_DEBUG, "==========start===========\n");
-	while(p) {
-		log_printf(LOG_DEBUG, "%s\n", p->key);
+	log_printf(LOG_DEBUG, "===search all key_tree nodes start===\n");
+	for (node = rb_first(&key_tree); node; node = rb_next(node)) {
+		p = rb_entry(node, struct key_node, node);
+		printf("key = %s\n", p->key);
 		for (i = 0; i < MAX_CLIENT_NUM && p->fd[i]; i++) {
 			log_printf(LOG_DEBUG, "%d, \n", p->fd[i]);
 		}
-		log_printf(LOG_DEBUG, "\n");
-		p = p->next;
 	}
-	log_printf(LOG_DEBUG,"===========end==========\n");
+	log_printf(LOG_DEBUG,"============end===========\n");
 }
 
 int send_to_register_client(char *msg, int msg_len)
 {
 	int ret =-1, key_found = 0;
 	char *key;
-	Node *p, *q;
+	Node *p;
 	struct json_object *parse, *tmp_obj;
 
 	parse = json_tokener_parse(msg);
@@ -777,13 +725,13 @@ int send_to_register_client(char *msg, int msg_len)
 		key = (char *)json_object_get_string(tmp_obj);
 	}
 
-	key_found = get_event_last_node(key, strlen(key), &p);
+	//key_found = get_event_last_node(key, strlen(key), &p);
+	key_found = key_search(&key_tree,  key, &p);
 	if (key_found == 1) {
 		int i = 0;
-		q = p->next;
-		while (i < MAX_CLIENT_NUM && q->fd[i]) {
-			ret = send(q->fd[i], msg, msg_len, 0);
-			log_printf(LOG_INFO,"send to registered fd: %d, send %d bytes\n",  q->fd[i], ret);
+		while (i < MAX_CLIENT_NUM && p->fd[i]) {
+			ret = send(p->fd[i], msg, msg_len, 0);
+			log_printf(LOG_INFO,"send to registered fd: %d, send %d bytes\n",  p->fd[i], ret);
 			i++;
 		}
 	} else {
@@ -795,55 +743,89 @@ int send_to_register_client(char *msg, int msg_len)
 /*
 *record the id map
 */
-int record_id_map(int old_id, int new_id, int fd)
+//int record_id_map(int old_id, int new_id, int fd)
+int id_insert(struct rb_root *root, struct id_node *pNode)
 {
-	ID_Node *pHead = id_list;
-	ID_Node *p = id_list;
-	ID_Node *tmp;
+	struct rb_node **new = &(root->rb_node), *parent = NULL;
 
-	while (p->next) {
-		p = p->next;
-	}
-
-	tmp = (ID_Node *)malloc(sizeof(ID_Node));
-	if (tmp == NULL) {
+	if (!pNode) {
 		return -1;
 	}
-	tmp->next = NULL;
-	tmp->new_id = new_id;
-	tmp->old_id = old_id;
-	tmp->fd = fd;
+	/* Figure out where to put new node */
+	while (*new) {
+		struct id_node *this = container_of(*new, struct id_node, node);
+		int result = pNode->new_id - this->new_id;
 
-	p->next = tmp;
-	pHead->new_id += 1;
+		parent = *new;
+		if (result < 0)
+			new = &((*new)->rb_left);
+		else if (result > 0)
+			new = &((*new)->rb_right);
+		else {
+			free(pNode);
+			return 0;
+		}
+	}
+
+	/* Add new node and rebalance tree. */
+	rb_link_node(&pNode->node, parent, new);
+	rb_insert_color(&pNode->node, root);
+	return 1;
+}
+
+int id_search(struct rb_root *root, int new_id, struct id_node **pNode)
+{
+	struct rb_node *node = root->rb_node;
+
+	while (node) {
+		struct id_node *this = container_of(node, struct id_node, node);
+		int result = new_id - this->new_id;
+
+		if (result < 0)
+			node = node->rb_left;
+		else if (result > 0)
+			node = node->rb_right;
+		else {
+			*pNode = this;
+			return 1;
+		}
+	}
 	return 0;
 }
 
 /*
 *remove invaild id
 */
-void update_id_map(int fd)
+//void update_id_map(int fd)
+void remove_fd_from_idtree(int fd)
 {
-	ID_Node *pHead = id_list;
-	ID_Node *p = id_list;
-	ID_Node *q;
+	struct rb_node *node;
+	struct id_node *p;
+	int ret;
 
-	while (p->next) {
-		if (p->next->fd == fd) {
-			q = p->next;
-			p->next = q->next;
-			free(q);
-			pHead->new_id -= 1;
-		} else {
-			p = p->next;
+	node = rb_first(&id_tree);
+	while (node) {
+		p = rb_entry(node, struct id_node, node);
+		if (p->fd == fd) {
+			rb_erase(&p->node, &id_tree);
+			free(p);
+			node = rb_first(&id_tree);
+			continue;
 		}
+		node = rb_next(node);
 	}
+}
+
+
+void remove_id_node(struct id_node *p)
+{
+	rb_erase(&p->node, &id_tree);
+	free(p);
 }
 
 int send_ack_to_client(char *msg)
 {
-	ID_Node *p = id_list;
-	ID_Node  *q;
+	ID_Node *p;
 	int id, found = 0;
 	int ret = -1;
 
@@ -851,25 +833,16 @@ int send_ack_to_client(char *msg)
 		return -1;
 	}
 
-	while (p->next) {
-		if (p->next->new_id == id) {
-			found = 1;
-			break;
-		}
-		p = p->next;
-	}
-
+	found = id_search(&id_tree, id, &p);
 	if (found == 1) {
 		int old_id, fd, msg_len;
 		char *newmsg;
 		struct json_object *parse;
 
 		//get old id and fd
-		q = p->next;
-		p->next = q-> next;
-		old_id = q->old_id;
-		fd = q->fd;
-		free(q);
+		old_id = p->old_id;
+		fd = p->fd;
+		remove_id_node(p);
 
 		parse = json_tokener_parse(msg);
 		/* replace with new id */
@@ -887,19 +860,44 @@ int send_ack_to_client(char *msg)
 	return ret;
 }
 
-
-
-void print_id_list(void)
+void print_id_tree(void)
 {
-	ID_Node *p = id_list->next;
-	int i = 0;
-
-	log_printf(LOG_INFO, "=====================\n");
-	while(p) {
-		log_printf(LOG_INFO, "%d:	%d,	%d\n", p->new_id, p->old_id, p->fd);
-		p = p->next;
+	struct rb_node *node;
+	struct id_node *p;
+	log_printf(LOG_DEBUG, "===search all id_tree nodes start===\n");
+	for (node = rb_first(&id_tree); node; node = rb_next(node)) {
+		p = rb_entry(node, struct id_node, node);
+		log_printf(LOG_DEBUG, "fd is %d\t, old_id is %d\t, new_id is %d\n", p->fd, p->old_id, p->new_id);
 	}
-	log_printf(LOG_INFO, "=====================\n");
+	log_printf(LOG_DEBUG, "===========end==========\n");
+}
+
+void free_key_tree(void)
+{
+	struct rb_node *node;
+	struct key_node *p;
+
+	node = rb_first(&key_tree);
+	while (node) {
+		p = rb_entry(node, struct key_node, node);
+		rb_erase(&p->node, &key_tree);
+		free(p);
+		node = rb_first(&key_tree);
+	}
+}
+
+void free_id_tree(void)
+{
+	struct rb_node *node;
+	struct id_node *p;
+
+	node = rb_first(&id_tree);
+	while (node) {
+		p = rb_entry(node, struct id_node, node);
+		rb_erase(&p->node, &id_tree);
+		free(p);
+		node = rb_first(&id_tree);
+	}
 }
 
 void logfile_init(char *filename)

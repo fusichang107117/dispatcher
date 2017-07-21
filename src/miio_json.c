@@ -20,7 +20,7 @@
 #include <sys/socket.h>
 #include "json-c/json.h"
 #include "miio_json.h"
-#include "miio_dispatcher.h"
+#include "miio_agent.h"
 
 /**
  * Verify if the input "string" is a valid json string.
